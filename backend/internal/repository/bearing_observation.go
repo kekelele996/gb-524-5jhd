@@ -93,6 +93,51 @@ func (r *ObservationRepository) Create(ctx context.Context, observation *model.B
 	})
 }
 
+func (r *ObservationRepository) BatchCreate(ctx context.Context, observations []*model.BearingObservation, actor Actor) (model.AuditEvent, error) {
+	var summary model.AuditEvent
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if len(observations) == 0 {
+			return api.NewError(422, "BATCH_EMPTY", "没有可导入的观测记录")
+		}
+		caseID := observations[0].CaseID
+		var count int64
+		if err := tx.Model(&model.InterferenceCase{}).Where("id = ? AND case_status <> ?", caseID, constants.CaseClosed).Count(&count).Error; err != nil {
+			return fmt.Errorf("check batch observation case: %w", err)
+		}
+		if count == 0 {
+			return api.NewError(409, "CASE_READ_ONLY", "案例不存在或已关闭，不能新增观测")
+		}
+		if err := tx.Create(&observations).Error; err != nil {
+			return fmt.Errorf("batch create observations: %w", err)
+		}
+		observationIDs := make([]uint, 0, len(observations))
+		stationIDSet := make(map[uint]struct{}, len(observations))
+		for _, observation := range observations {
+			observationIDs = append(observationIDs, observation.ID)
+			stationIDSet[observation.StationID] = struct{}{}
+			audit := NewAudit(actor, "bearing_observation.created", "bearing_observation", observation.ID, nil, observation)
+			if err := tx.Create(&audit).Error; err != nil {
+				return fmt.Errorf("audit batch observation row: %w", err)
+			}
+		}
+		stationIDs := make([]uint, 0, len(stationIDSet))
+		for id := range stationIDSet {
+			stationIDs = append(stationIDs, id)
+		}
+		after := map[string]any{
+			"case_id": caseID, "imported": len(observations),
+			"observation_ids": observationIDs, "station_ids": stationIDs,
+		}
+		batchAudit := NewAudit(actor, "bearing_observation.batch_imported", "bearing_observation", 0, nil, after)
+		if err := tx.Create(&batchAudit).Error; err != nil {
+			return fmt.Errorf("audit batch observation import: %w", err)
+		}
+		summary = batchAudit
+		return nil
+	})
+	return summary, err
+}
+
 func (r *ObservationRepository) Exclude(ctx context.Context, id uint, reason string, actor Actor) (model.BearingObservation, error) {
 	var updated model.BearingObservation
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

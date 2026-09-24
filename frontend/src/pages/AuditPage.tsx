@@ -36,6 +36,10 @@ export function AuditPage() {
   const pending = cases.find((item) => item.case_status === 'pending_review') ?? null
 
   const objectLabel = (event: AuditEvent) => {
+    if (event.action === 'bearing_observation.batch_imported') {
+      const summary = readBatchSummary(event.after_json)
+      return summary ? `批量导入 ${summary.imported} 条观测（案例 #${summary.case_id}）` : '批量导入观测'
+    }
     if (event.entity_type === 'interference_case') return caseById.get(event.entity_id)?.case_code ?? `案例 #${event.entity_id}`
     if (event.entity_type === 'bearing_observation') {
       const observation = observationById.get(event.entity_id)
@@ -78,5 +82,17 @@ export function AuditPage() {
       <ReviewDecisionDialog open={Boolean(reviewTarget)} item={reviewTarget} onClose={() => setReviewTarget(null)} onDecision={async (request) => { if (reviewTarget) { await transition(reviewTarget.id, request); await loadAudits() } }} />
     </>
   )
+}
+
+function readBatchSummary(raw: string): { case_id: number; imported: number } | null {
+  try {
+    const parsed = JSON.parse(raw) as { case_id?: number; imported?: number }
+    if (typeof parsed.case_id === 'number' && typeof parsed.imported === 'number') {
+      return { case_id: parsed.case_id, imported: parsed.imported }
+    }
+  } catch {
+    // 非结构化摘要时回退到默认标签。
+  }
+  return null
 }
 

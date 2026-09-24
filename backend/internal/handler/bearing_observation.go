@@ -99,3 +99,41 @@ func (h *ObservationHandler) ValidateCase(c *gin.Context) {
 	}
 	api.Success(c, http.StatusOK, result)
 }
+
+func (h *ObservationHandler) PreviewBatchImport(c *gin.Context) {
+	id, ok := parseID(c, "id")
+	if !ok {
+		return
+	}
+	var request dto.BatchImportTextRequest
+	if !bindJSON(c, &request) {
+		return
+	}
+	result, err := h.service.PreviewBatchImport(c.Request.Context(), id, request.Text)
+	if err != nil {
+		api.Fail(c, err)
+		return
+	}
+	api.Success(c, http.StatusOK, result)
+}
+
+func (h *ObservationHandler) CommitBatchImport(c *gin.Context) {
+	id, ok := parseID(c, "id")
+	if !ok {
+		return
+	}
+	actor, ok := actorFromContext(c)
+	if !ok {
+		return
+	}
+	var request dto.BatchImportTextRequest
+	if !bindJSON(c, &request) {
+		return
+	}
+	result, err := h.service.CommitBatchImport(c.Request.Context(), id, request.Text, actor)
+	if err != nil {
+		api.Fail(c, err)
+		return
+	}
+	api.Success(c, http.StatusCreated, result)
+}

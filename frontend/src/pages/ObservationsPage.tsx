@@ -2,7 +2,9 @@ import { FormEvent, useEffect, useMemo, useState } from 'react'
 import AddRounded from '@mui/icons-material/AddRounded'
 import BlockRounded from '@mui/icons-material/BlockRounded'
 import FactCheckRounded from '@mui/icons-material/FactCheckRounded'
+import PostAddRounded from '@mui/icons-material/PostAddRounded'
 import { Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, MenuItem, Stack, Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography } from '@mui/material'
+import { BatchImportDialog } from '../components/common/BatchImportDialog'
 import { PageHeader } from '../components/common/PageHeader'
 import { QualityBadge } from '../components/common/QualityBadge'
 import { useAuth } from '../hooks/useAuth'
@@ -23,9 +25,12 @@ export function ObservationsPage() {
   const createObservation = useObservationStore((state) => state.createObservation)
   const excludeObservation = useObservationStore((state) => state.excludeObservation)
   const validateCase = useObservationStore((state) => state.validateCase)
+  const previewImport = useObservationStore((state) => state.previewImport)
+  const commitImport = useObservationStore((state) => state.commitImport)
   const validation = useObservationStore((state) => state.validation)
   const [caseId, setCaseId] = useState(0)
   const [createOpen, setCreateOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const [excludeTarget, setExcludeTarget] = useState<BearingObservation | null>(null)
   const [excludeReason, setExcludeReason] = useState('')
   const [saving, setSaving] = useState(false)
@@ -85,6 +90,7 @@ export function ObservationsPage() {
         actions={
           <>
             <Button variant="outlined" startIcon={<FactCheckRounded />} disabled={!caseId} onClick={() => void validateCase(caseId)}>批量校验</Button>
+            {hasRole('observer', 'analyst', 'admin') && <Button variant="outlined" startIcon={<PostAddRounded />} disabled={!caseId} onClick={() => setImportOpen(true)}>批量导入</Button>}
             {hasRole('observer', 'analyst', 'admin') && <Button variant="contained" startIcon={<AddRounded />} disabled={!caseId} onClick={() => setCreateOpen(true)}>录入观测</Button>}
           </>
         }
@@ -147,6 +153,17 @@ export function ObservationsPage() {
         <DialogContent><TextField sx={{ mt: 1 }} fullWidth multiline minRows={3} label="排除证据" value={excludeReason} onChange={(event) => setExcludeReason(event.target.value)} helperText="该动作保留原始值并写入审计，至少填写 6 个字符。" /></DialogContent>
         <DialogActions><Button onClick={() => setExcludeTarget(null)} disabled={saving}>保留观测</Button><Button color="warning" variant="contained" disabled={saving || excludeReason.trim().length < 6} onClick={() => void exclude()}>记录并排除</Button></DialogActions>
       </Dialog>
+
+      {selectedCase && (
+        <BatchImportDialog
+          open={importOpen}
+          caseId={selectedCase.id}
+          caseCode={selectedCase.case_code}
+          onClose={() => setImportOpen(false)}
+          onPreview={previewImport}
+          onCommit={commitImport}
+        />
+      )}
     </>
   )
 }
