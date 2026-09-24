@@ -50,6 +50,8 @@ func New(log *slog.Logger, authService *service.AuthService, handlers Handlers, 
 	protected.GET("/observations", handlers.Observation.List)
 	protected.GET("/observations/:id", handlers.Observation.Get)
 	protected.POST("/observations", middleware.RBAC(constants.RoleObserver, constants.RoleAnalyst, constants.RoleAdmin), handlers.Observation.Create)
+	protected.POST("/observations/batch/preview", middleware.RBAC(constants.RoleObserver, constants.RoleAnalyst, constants.RoleAdmin), handlers.Observation.PreviewBatch)
+	protected.POST("/observations/batch", middleware.RBAC(constants.RoleObserver, constants.RoleAnalyst, constants.RoleAdmin), handlers.Observation.ImportBatch)
 	protected.POST("/observations/:id/exclude", middleware.RBAC(constants.RoleAnalyst, constants.RoleAdmin), handlers.Observation.Exclude)
 	protected.GET("/cases/:id/validate-observations", handlers.Observation.ValidateCase)
 

@@ -44,3 +44,45 @@ export interface BatchValidation {
   items: ObservationValidation[]
 }
 
+export interface BatchImportRowInput {
+  station_code: string
+  bearing_deg: string
+  frequency_hz: string
+  bandwidth_hz: string
+  signal_dbm: string
+  quality: string
+  observed_at: string
+}
+
+export interface ImportRowPreview {
+  line: number
+  valid: boolean
+  issues: string[]
+  station_code: string
+  station_id: number
+  bearing_deg: number
+  corrected_bearing_deg: number
+  frequency_hz: number
+  bandwidth_hz: number
+  signal_dbm: number
+  quality: string
+  observed_at: string
+  frequency_delta_hz: number
+}
+
+export interface BatchImportPreview {
+  case_id: number
+  case_code: string
+  center_frequency_hz: number
+  total: number
+  valid: number
+  invalid: number
+  items: ImportRowPreview[]
+}
+
+export interface BatchImportResult {
+  case_id: number
+  imported_count: number
+  observations: BearingObservation[]
+}
+

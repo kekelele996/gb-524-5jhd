@@ -1,5 +1,5 @@
 import { apiClient } from './client'
-import type { BearingObservation, BatchValidation, ObservationInput } from '../types/observation'
+import type { BearingObservation, BatchImportPreview, BatchImportResult, BatchImportRowInput, BatchValidation, ObservationInput } from '../types/observation'
 
 export const observationApi = {
   list: (caseId?: number, stationId?: number) => {
@@ -11,6 +11,10 @@ export const observationApi = {
   get: (id: number) => apiClient.get<BearingObservation>(`/observations/${id}`),
   create: (input: ObservationInput) => apiClient.post<BearingObservation>('/observations', input),
   exclude: (id: number, reason: string) => apiClient.post<BearingObservation>(`/observations/${id}/exclude`, { reason }),
-  validateCase: (caseId: number) => apiClient.get<BatchValidation>(`/cases/${caseId}/validate-observations`)
+  validateCase: (caseId: number) => apiClient.get<BatchValidation>(`/cases/${caseId}/validate-observations`),
+  previewBatch: (caseId: number, rows: BatchImportRowInput[]) =>
+    apiClient.post<BatchImportPreview>('/observations/batch/preview', { case_id: caseId, rows }),
+  importBatch: (caseId: number, rows: BatchImportRowInput[]) =>
+    apiClient.post<BatchImportResult>('/observations/batch', { case_id: caseId, rows })
 }
 

@@ -46,6 +46,15 @@ func (r *StationRepository) Get(ctx context.Context, id uint) (model.ReceiverSta
 	return station, nil
 }
 
+// ListAll 返回全部测向站，供批量导入时按编号解析，避免逐行查询。
+func (r *StationRepository) ListAll(ctx context.Context) ([]model.ReceiverStation, error) {
+	var stations []model.ReceiverStation
+	if err := r.db.WithContext(ctx).Order("station_code ASC").Find(&stations).Error; err != nil {
+		return nil, fmt.Errorf("list all receiver stations: %w", err)
+	}
+	return stations, nil
+}
+
 func (r *StationRepository) Create(ctx context.Context, station *model.ReceiverStation, actor Actor) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(station).Error; err != nil {

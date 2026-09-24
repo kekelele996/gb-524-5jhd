@@ -93,6 +93,72 @@ func (r *ObservationRepository) Create(ctx context.Context, observation *model.B
 	})
 }
 
+// BatchImportSummary 是批量导入审计事件中保留的摘要。
+type BatchImportSummary struct {
+	CaseID        uint                  `json:"case_id"`
+	ImportedCount int                   `json:"imported_count"`
+	StationCodes  []string              `json:"station_codes"`
+	Observations  []BatchImportAuditRow `json:"observations"`
+}
+
+type BatchImportAuditRow struct {
+	StationID   uint    `json:"station_id"`
+	BearingDeg  float64 `json:"bearing_deg"`
+	FrequencyHz float64 `json:"frequency_hz"`
+	BandwidthHz float64 `json:"bandwidth_hz"`
+	SignalDBM   float64 `json:"signal_dbm"`
+	Quality     string  `json:"quality"`
+	ObservedAt  string  `json:"observed_at"`
+}
+
+// CreateBatch 在单个事务内写入整批观测；任一行失败则整批回滚，并留下一条批量导入审计。
+func (r *ObservationRepository) CreateBatch(ctx context.Context, observations []model.BearingObservation, summary BatchImportSummary, actor Actor) ([]model.BearingObservation, error) {
+	if len(observations) == 0 {
+		return nil, api.NewError(400, "EMPTY_BATCH_IMPORT", "批量导入至少需要一行记录")
+	}
+	caseID := observations[0].CaseID
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&model.InterferenceCase{}).Where("id = ? AND case_status <> ?", caseID, constants.CaseClosed).Count(&count).Error; err != nil {
+			return fmt.Errorf("check observation case: %w", err)
+		}
+		if count == 0 {
+			return api.NewError(409, "CASE_READ_ONLY", "案例不存在或已关闭，不能新增观测")
+		}
+		if err := tx.CreateInBatches(&observations, len(observations)).Error; err != nil {
+			return fmt.Errorf("batch create observations: %w", err)
+		}
+		ids := make([]uint, 0, len(observations))
+		for _, observation := range observations {
+			ids = append(ids, observation.ID)
+		}
+		summary.ImportedCount = len(observations)
+		audit := NewAudit(actor, "bearing_observation.batch_imported", "bearing_observation_batch", caseID, nil, map[string]any{
+			"summary": summary, "observation_ids": ids,
+		})
+		if err := tx.Create(&audit).Error; err != nil {
+			return fmt.Errorf("audit observation batch import: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	var created []model.BearingObservation
+	if err := r.db.WithContext(ctx).Preload("Station").Where("case_id = ? AND id IN ?", caseID, batchIDs(observations)).Order("observed_at DESC, id DESC").Find(&created).Error; err != nil {
+		return nil, fmt.Errorf("reload batch observations: %w", err)
+	}
+	return created, nil
+}
+
+func batchIDs(observations []model.BearingObservation) []uint {
+	ids := make([]uint, 0, len(observations))
+	for _, observation := range observations {
+		ids = append(ids, observation.ID)
+	}
+	return ids
+}
+
 func (r *ObservationRepository) Exclude(ctx context.Context, id uint, reason string, actor Actor) (model.BearingObservation, error) {
 	var updated model.BearingObservation
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,4 +133,271 @@ func normalizeBearing(value float64) float64 {
 		value += 360
 	}
 	return value
+}
+
+// parsedImportRow 保存单行解析结果，预览和提交共用同一套校验。
+type parsedImportRow struct {
+	line       int
+	issues     []string
+	station    *model.ReceiverStation
+	bearing    float64
+	frequency  float64
+	bandwidth  float64
+	signalDBM  float64
+	quality    constants.ObservationQuality
+	observedAt time.Time
+}
+
+var qualityAliases = map[string]constants.ObservationQuality{
+	"good": constants.QualityGood, "良好": constants.QualityGood, "g": constants.QualityGood,
+	"fair": constants.QualityFair, "一般": constants.QualityFair, "f": constants.QualityFair,
+	"poor": constants.QualityPoor, "偏低": constants.QualityPoor, "p": constants.QualityPoor,
+	"差": constants.QualityPoor,
+}
+
+// PreviewBatchImport 逐行校验粘贴的批量记录，返回每行可用性和原因，但不写入任何数据。
+func (s *ObservationService) PreviewBatchImport(ctx context.Context, request dto.BatchImportRequest) (dto.BatchImportPreviewResponse, error) {
+	caseRecord, stations, err := s.loadBatchContext(ctx, request.CaseID)
+	if err != nil {
+		return dto.BatchImportPreviewResponse{}, err
+	}
+	stationByCode := make(map[string]model.ReceiverStation, len(stations))
+	for _, station := range stations {
+		stationByCode[station.StationCode] = station
+	}
+	parsed := s.parseImportRows(request.Rows, caseRecord, stationByCode)
+	return buildPreview(caseRecord, request.Rows, parsed), nil
+}
+
+// BatchImport 在整批记录均可用时一次性写入；任一行不合格则拒绝整批，不保存任何记录。
+func (s *ObservationService) BatchImport(ctx context.Context, request dto.BatchImportRequest, actor repository.Actor) (dto.BatchImportResponse, error) {
+	if !constants.CanObserve(actor.Role) {
+		return dto.BatchImportResponse{}, api.ErrForbidden
+	}
+	caseRecord, stations, err := s.loadBatchContext(ctx, request.CaseID)
+	if err != nil {
+		return dto.BatchImportResponse{}, err
+	}
+	stationByCode := make(map[string]model.ReceiverStation, len(stations))
+	for _, station := range stations {
+		stationByCode[station.StationCode] = station
+	}
+	parsed := s.parseImportRows(request.Rows, caseRecord, stationByCode)
+	for _, row := range parsed {
+		if len(row.issues) > 0 {
+			preview := buildPreview(caseRecord, request.Rows, parsed)
+			return dto.BatchImportResponse{}, api.WithDetails(api.NewError(422, "BATCH_IMPORT_REJECTED", "存在不合格行，整批记录未保存"), map[string]any{
+				"valid": preview.Valid, "invalid": preview.Invalid, "items": preview.Items,
+			})
+		}
+	}
+	observations := make([]model.BearingObservation, 0, len(parsed))
+	auditRows := make([]repository.BatchImportAuditRow, 0, len(parsed))
+	stationCodes := make([]string, 0, len(parsed))
+	seenStation := make(map[string]struct{})
+	for _, row := range parsed {
+		observedAt := row.observedAt
+		corrected := normalizeBearing(row.bearing + row.station.AntennaBiasDeg)
+		observations = append(observations, model.BearingObservation{
+			StationID: row.station.ID, CaseID: caseRecord.ID,
+			BearingDeg: row.bearing, CorrectedBearingDeg: corrected,
+			SignalDBM: row.signalDBM, FrequencyHz: row.frequency,
+			BandwidthHz: row.bandwidth, ObservedAt: observedAt,
+			Quality: row.quality, CreatedBy: actor.UserID,
+		})
+		auditRows = append(auditRows, repository.BatchImportAuditRow{
+			StationID: row.station.ID, BearingDeg: row.bearing, FrequencyHz: row.frequency,
+			BandwidthHz: row.bandwidth, SignalDBM: row.signalDBM,
+			Quality: string(row.quality), ObservedAt: observedAt.Format(time.RFC3339),
+		})
+		if _, ok := seenStation[row.station.StationCode]; !ok {
+			seenStation[row.station.StationCode] = struct{}{}
+			stationCodes = append(stationCodes, row.station.StationCode)
+		}
+	}
+	summary := repository.BatchImportSummary{
+		CaseID: caseRecord.ID, ImportedCount: len(observations),
+		StationCodes: stationCodes, Observations: auditRows,
+	}
+	created, err := s.repo.CreateBatch(ctx, observations, summary, actor)
+	if err != nil {
+		return dto.BatchImportResponse{}, err
+	}
+	return dto.BatchImportResponse{CaseID: caseRecord.ID, ImportedCount: len(created), Observations: created}, nil
+}
+
+func (s *ObservationService) loadBatchContext(ctx context.Context, caseID uint) (model.InterferenceCase, []model.ReceiverStation, error) {
+	caseRecord, err := s.caseRepo.Get(ctx, caseID)
+	if err != nil {
+		return model.InterferenceCase{}, nil, err
+	}
+	if caseRecord.CaseStatus == constants.CaseClosed {
+		return model.InterferenceCase{}, nil, api.NewError(409, "CASE_READ_ONLY", "案例已关闭，不能录入观测")
+	}
+	stations, err := s.stationRepo.ListAll(ctx)
+	if err != nil {
+		return model.InterferenceCase{}, nil, err
+	}
+	return caseRecord, stations, nil
+}
+
+func (s *ObservationService) parseImportRows(rows []dto.BatchImportRow, caseRecord model.InterferenceCase, stationByCode map[string]model.ReceiverStation) []parsedImportRow {
+	parsed := make([]parsedImportRow, 0, len(rows))
+	now := time.Now().UTC()
+	for index, raw := range rows {
+		row := parsedImportRow{line: index + 1, issues: []string{}}
+
+		code := strings.ToUpper(strings.TrimSpace(raw.StationCode))
+		if code == "" {
+			row.issues = append(row.issues, "测向站编号为空")
+		} else if station, ok := stationByCode[code]; ok {
+			if station.StationStatus != "active" {
+				row.issues = append(row.issues, "测向站 "+code+" 未处于启用状态")
+			}
+			row.station = &station
+		} else {
+			row.issues = append(row.issues, "测向站编号 "+code+" 不存在")
+		}
+
+		bearing, ok := parseImportNumber(raw.BearingDeg)
+		if ok {
+			if bearing < 0 || bearing >= 360 {
+				row.issues = append(row.issues, "原始方位必须在 [0, 360) 范围内")
+			}
+			row.bearing = bearing
+		} else {
+			row.issues = append(row.issues, numericIssue(raw.BearingDeg, "原始方位"))
+		}
+
+		frequency, freqOK := parseImportNumber(raw.FrequencyHz)
+		if freqOK && frequency > 0 {
+			row.frequency = frequency
+		} else {
+			row.issues = append(row.issues, numericIssue(raw.FrequencyHz, "频率"))
+		}
+
+		bandwidth, bwOK := parseImportNumber(raw.BandwidthHz)
+		if bwOK && bandwidth > 0 {
+			row.bandwidth = bandwidth
+		} else {
+			row.issues = append(row.issues, numericIssue(raw.BandwidthHz, "带宽"))
+		}
+
+		signal, signalOK := parseImportNumber(raw.SignalDBM)
+		if signalOK {
+			if signal < -200 || signal > 50 {
+				row.issues = append(row.issues, "信号强度必须在 -200 到 50 dBm 之间")
+			}
+			row.signalDBM = signal
+		} else {
+			row.issues = append(row.issues, numericIssue(raw.SignalDBM, "信号强度"))
+		}
+
+		qualityToken := strings.ToLower(strings.TrimSpace(raw.Quality))
+		if quality, ok := qualityAliases[qualityToken]; ok {
+			row.quality = quality
+		} else {
+			row.issues = append(row.issues, "质量等级无效（支持 good/fair/poor 或 良好/一般/偏低）")
+		}
+
+		observedAt := time.Time{}
+		if value := strings.TrimSpace(raw.ObservedAt); value != "" {
+			parsedTime, timeErr := parseObservedAt(value)
+			if timeErr != nil {
+				row.issues = append(row.issues, "观测时间格式无效，支持 RFC3339 或 2006-01-02 15:04:05")
+			} else {
+				observedAt = parsedTime
+			}
+		} else {
+			observedAt = now
+		}
+		if !observedAt.IsZero() {
+			if observedAt.After(now.Add(5 * time.Minute)) {
+				row.issues = append(row.issues, "观测时间不能晚于当前时间")
+			}
+			row.observedAt = observedAt
+		}
+
+		if freqOK && frequency > 0 && bwOK && bandwidth > 0 {
+			delta := math.Abs(caseRecord.FrequencyCenterHz - frequency)
+			if delta > bandwidth/2 {
+				row.issues = append(row.issues, "观测频率超出案例中心频率带宽")
+			}
+		}
+
+		parsed = append(parsed, row)
+	}
+	return parsed
+}
+
+func buildPreview(caseRecord model.InterferenceCase, raw []dto.BatchImportRow, parsed []parsedImportRow) dto.BatchImportPreviewResponse {
+	response := dto.BatchImportPreviewResponse{
+		CaseID: caseRecord.ID, CaseCode: caseRecord.CaseCode,
+		CenterFrequencyHz: caseRecord.FrequencyCenterHz,
+		Total:             len(parsed), Items: make([]dto.ImportRowPreview, 0, len(parsed)),
+	}
+	for index, row := range parsed {
+		item := dto.ImportRowPreview{
+			Line: row.line, Valid: len(row.issues) == 0, Issues: row.issues,
+			StationCode: strings.ToUpper(strings.TrimSpace(raw[index].StationCode)),
+			BearingDeg:  row.bearing, FrequencyHz: row.frequency, BandwidthHz: row.bandwidth,
+			SignalDBM: row.signalDBM, Quality: string(row.quality),
+		}
+		if row.station != nil {
+			item.StationID = row.station.ID
+			item.CorrectedBearingDeg = normalizeBearing(row.bearing + row.station.AntennaBiasDeg)
+		}
+		if !row.observedAt.IsZero() {
+			item.ObservedAt = row.observedAt.Format(time.RFC3339)
+		}
+		if row.frequency > 0 {
+			item.FrequencyDeltaHz = math.Abs(caseRecord.FrequencyCenterHz - row.frequency)
+		}
+		if item.Valid {
+			response.Valid++
+		} else {
+			response.Invalid++
+		}
+		response.Items = append(response.Items, item)
+	}
+	return response
+}
+
+func parseImportNumber(value string) (float64, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, false
+	}
+	number, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil || math.IsNaN(number) || math.IsInf(number, 0) {
+		return 0, false
+	}
+	return number, true
+}
+
+func numericIssue(value, field string) string {
+	if strings.TrimSpace(value) == "" {
+		return field + "为空"
+	}
+	return field + "不是有效数字：" + strings.TrimSpace(value)
+}
+
+func parseObservedAt(value string) (time.Time, error) {
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed.UTC(), nil
+	}
+	layouts := []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		time.RFC3339,
+	}
+	var lastErr error
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC(), nil
+		} else {
+			lastErr = err
+		}
+	}
+	return time.Time{}, lastErr
 }

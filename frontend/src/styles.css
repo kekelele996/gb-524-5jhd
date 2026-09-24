@@ -60,6 +60,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.8rem; }
 .table-scroll table { min-width: 840px; }
 .secondary-text { color: #667e75; font-size: 0.78rem; }
 .row-muted { opacity: 0.62; background: #f0f2ef; }
+.row-invalid { background: #fdecea; }
 .row-warning { background: #fff3e7; }
 .status-text, .case-status, .priority { display: inline-flex; align-items: center; gap: 4px; font-size: 0.78rem; font-weight: 700; }
 .status-active, .case-confirmed { color: #246447; }

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { observationApi } from '../api/observations'
-import type { BearingObservation, BatchValidation, ObservationInput } from '../types/observation'
+import type { BearingObservation, BatchImportPreview, BatchImportResult, BatchImportRowInput, BatchValidation, ObservationInput } from '../types/observation'
 
 interface ObservationState {
   observations: BearingObservation[]
@@ -10,6 +10,17 @@ interface ObservationState {
   createObservation: (input: ObservationInput) => Promise<BearingObservation>
   excludeObservation: (id: number, reason: string) => Promise<void>
   validateCase: (caseId: number) => Promise<BatchValidation>
+  clearValidation: () => void
+  previewBatch: (caseId: number, rows: BatchImportRowInput[]) => Promise<BatchImportPreview>
+  importBatch: (caseId: number, rows: BatchImportRowInput[]) => Promise<BatchImportResult>
+}
+
+function mergeObservations(current: BearingObservation[], created: BearingObservation[]) {
+  const existing = new Map(current.map((item) => [item.id, item]))
+  for (const item of created) existing.set(item.id, item)
+  return [...existing.values()].sort(
+    (a, b) => new Date(b.observed_at).getTime() - new Date(a.observed_at).getTime() || b.id - a.id,
+  )
 }
 
 export const useObservationStore = create<ObservationState>((set, get) => ({
@@ -38,6 +49,15 @@ export const useObservationStore = create<ObservationState>((set, get) => ({
     const response = await observationApi.validateCase(caseId)
     set({ validation: response.data })
     return response.data
-  }
+  },
+  clearValidation: () => set({ validation: null }),
+  previewBatch: async (caseId, rows) => {
+    const response = await observationApi.previewBatch(caseId, rows)
+    return response.data
+  },
+  importBatch: async (caseId, rows) => {
+    const response = await observationApi.importBatch(caseId, rows)
+    set({ observations: mergeObservations(get().observations, response.data.observations) })
+    return response.data
+  },
 }))
-
